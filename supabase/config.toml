@@ -1,0 +1,8 @@
+project_id = "wizer-autonomous-company-os"
+
+[api]
+enabled = true
+schemas = ["public", "graphql_public"]
+
+[db]
+major_version = 17
