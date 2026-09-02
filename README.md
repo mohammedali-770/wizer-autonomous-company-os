@@ -10,6 +10,10 @@ Wizer is an open, provider-neutral foundation for running an AI-native company a
 - Runtime agent deliberation, persistent event bus, autonomous scheduler, authority checks, human approval boundaries, idempotent Integration Gateway, dynamic organization proposals, executive meetings, and anti-loop convergence controls.
 - Supabase/Postgres schema with company isolation, RLS, audit history, vector memory, metrics/provenance, meetings, events, integrations, and indexes.
 
+## Revenue playbooks
+
+The first end-to-end business motion ships in `src/growth`: find businesses whose public listing shows no working website or app, build each a real one-page preview, and offer it to them once, honestly, behind a compliance gate and a human approval boundary. See [docs/PLAYBOOK-WEBSITE-OUTREACH.md](docs/PLAYBOOK-WEBSITE-OUTREACH.md).
+
 ## Architecture
 
 `Trigger → Global Context → Agent Deliberation → Authority Engine → Work/Event → Integration Gateway → Evidence/Memory → Convergence Monitor`
@@ -20,7 +24,7 @@ Internal Audit has independent read/finding privileges. High-risk actions requir
 
 1. Install Node.js 20+ and run `npm ci`.
 2. Copy `.env.example` to `.env` and add a Supabase URL/publishable key plus server-only secret and model credentials.
-3. Link the Supabase CLI project and apply `supabase/migrations/20260810000100_wizer_foundation.sql`.
+3. Link the Supabase CLI project and apply the migrations in `supabase/migrations` in filename order.
 4. Run `npm run check`.
 
 The core deliberately exposes interfaces rather than binding Wizer to one LLM or integration vendor. Implement `ReasoningModel`, `Store`, and `IntegrationAdapter` for deployment.
