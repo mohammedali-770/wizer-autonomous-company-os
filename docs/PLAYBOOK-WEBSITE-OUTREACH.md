@@ -55,3 +55,49 @@ Every run writes `prospect.batch_discovered`, `demo.published`, `outreach.blocke
 ## Data retention
 
 `prospects.retain_until` comes from the source's declared retention cap. `public.purge_expired_prospects()` soft-deletes expired records; schedule it. Opt-out suppression is stored as a hash and is never purged — it is the record of a "no".
+
+## Running it
+
+```bash
+npm ci && npm run build
+cp .env.example .env                                  # model key, Supabase, hosting, channel
+cp outreach.policy.example.json outreach.policy.json  # your legal identity and per-country rules
+supabase db push                                      # applies both migrations
+
+# 1. discover, probe, build previews, queue outreach for a human
+node dist/src/cli/wizer.js campaign --query bakery --area "Manchester" --country GB --limit 10
+
+# 2. read what it wants to send, then decide
+node dist/src/cli/wizer.js approvals
+node dist/src/cli/wizer.js approve <approvalId> --by "your name"
+
+# 3. deliver only what a human approved (compliance is re-checked at send time)
+node dist/src/cli/wizer.js send-approved
+
+# someone says no
+node dist/src/cli/wizer.js opt-out --prospect openstreetmap:node/42 --contact hello@business.example
+```
+
+`--dry-run` swaps Supabase for in-memory evidence and prints the drafted messages instead of storing them; add `--auto-approve` (refused against a live channel) to walk the whole path including the send adapter, which writes files to `OUTREACH_DIR` rather than sending. `--query` takes an OSM tag filter (`shop=bakery`) or a plain category (`bakery`, `dentist`, `plumber`, …); `--area` takes a place name or a `south,west,north,east` bounding box.
+
+## The adapters
+
+| Interface | Implementation | Notes |
+| --- | --- | --- |
+| `BusinessDirectorySource` | `OpenStreetMapDirectory` (Overpass) | ODbL, so derived storage is permitted with attribution; the query builder only accepts a validated tag filter and a place name or bbox, so a category string can never inject Overpass QL. Public instances rate-limit — point `OVERPASS_ENDPOINT` elsewhere if needed. |
+| `WebProbe` | `PoliteWebProbe` | DNS lookup, one throttled request per host, `robots.txt` honored, capped response reads, identifying user agent. Set `PROBE_USER_AGENT` to a real contact URL. |
+| `AppDirectory` | `AppleAppStoreDirectory` | iTunes Search API. Google Play has no equivalent open endpoint, so `app: "none"` means "no Apple listing matched" — it is a weak signal and never qualifies a business on its own. |
+| `ReasoningModel` | `AnthropicReasoningModel` | Claude with structured outputs (`output_config.format`), so preview content and outreach copy arrive schema-valid; refusals surface as errors rather than as empty pages. |
+| `Store`, `SuppressionList`, `ApprovalGate` | `SupabaseStore`, `SupabaseSuppressionList`, `SupabaseApprovalGate` | Server-side secret key, so keep it off any client. In-memory equivalents exist for `--dry-run`. |
+| `site_host` | `SupabaseStorageSiteHost`, `LocalDirectorySiteHost` | Both refuse to publish anything flagged indexable. Storage previews live in a public bucket at an unguessable path; serve production previews from a domain that is not your app's origin. |
+| `outreach_channel` | `ResendEmailChannel`, `DryRunOutreachChannel` | Real sends carry `List-Unsubscribe` headers and a per-message idempotency key. Neither adapter will send anything but email — other channels need their own reviewed adapter. |
+
+### What the probe can and cannot see
+
+Presence is graded from what a server returns without JavaScript, which produces two failure modes the assessor handles explicitly:
+
+- A **script-rendered site** returns a large HTML shell with no readable text. That is a working website; it is classified `owned` and never contacted.
+- A **robots-disallowed site** proves a site exists. Also `owned`, never contacted.
+- A domain that resolves but never answers is `broken` with a confidence penalty that drops it below the contact threshold — a suspicion, not evidence.
+
+The only classifications that lead to contact are: no website listed at all, a listing pointing at a social or link-in-bio page, and a domain that resolves to a 4xx/5xx or a near-empty placeholder page.

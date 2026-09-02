@@ -70,7 +70,7 @@ export class WebsiteOutreachPipeline {
     for (const prospect of discovery.prospects) {
       try {
         const assessment = await this.deps.assessor.assess(prospect);
-        await this.deps.store.append("prospects.presence_assessed", assessment);
+        await this.deps.store.append("prospects.presence_assessed", {companyId: input.companyId, ...assessment});
         const qualification = qualify(assessment);
         if (!qualification.qualified) { result.skipped.push({prospectId: prospect.id, stage: "qualify", reasons: qualification.reasons}); continue; }
         result.qualified += 1;
@@ -83,7 +83,7 @@ export class WebsiteOutreachPipeline {
         const built = await this.deps.builder.build({prospect, assessment});
         const site = await this.deps.publisher.publish({companyId: input.companyId, site: built, prospect});
         result.previewsPublished += 1;
-        await this.deps.store.append("demo_sites.record", {...site, html: "[stored by hosting adapter]"});
+        await this.deps.store.append("demo_sites.record", {companyId: input.companyId, ...site, html: "[stored by hosting adapter]"});
         await this.emit(input.companyId, "demo.published", {prospectId: prospect.id, siteId: site.id, previewUrl: site.previewUrl, indexable: false}, correlationId);
 
         const touch = touches.filter(entry => entry.prospectId === prospect.id).length + 1;
@@ -95,7 +95,7 @@ export class WebsiteOutreachPipeline {
           result.skipped.push({prospectId: prospect.id, stage: "compliance", reasons: verdict.violations});
           continue;
         }
-        await this.deps.store.append("outreach.messages", {...message, warnings: verdict.warnings, status: "pending_approval"});
+        await this.deps.store.append("outreach.messages", {companyId: input.companyId, demoSiteId: site.id, ...message, warnings: verdict.warnings, status: "pending_approval"});
 
         const approval = sendRequiresHuman || verdict.requiresHuman
           ? await this.deps.approvals.request({companyId: input.companyId, kind: "outreach.send", subject: `${prospect.name} (${contact.channel})`, payload: {message, assessment, previewUrl: site.previewUrl, warnings: verdict.warnings}, idempotencyKey: `approval:outreach:${prospect.id}:${touch}`})

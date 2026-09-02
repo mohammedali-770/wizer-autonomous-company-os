@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ReasoningModel } from "../domain.js";
 import type { IntegrationGateway } from "../integrations.js";
-import type { BusinessProspect, DemoSite, DemoSiteContent, PresenceAssessment } from "./domain.js";
+import { DEMO_SITE_CONTENT_SCHEMA, type BusinessProspect, type DemoSite, type DemoSiteContent, type PresenceAssessment } from "./domain.js";
 
 export type SenderIdentity = {legalName: string; websiteUrl: string; replyToEmail: string; takedownUrl: string};
 
@@ -59,7 +59,7 @@ export class DemoSiteBuilder {
     const raw = await this.model.complete([
       {role: "system", content: "You write a one-page website preview for a small business that currently has no working site. You may use ONLY the verified facts supplied. Never invent hours, prices, founding dates, ratings, awards, credentials, customer counts, staff names, or contact details. Anything a real owner would have to supply goes into `placeholders` as a short question, never into the prose. Write plain text without markup. Return only JSON: {headline, subheadline, about, sections:[{title, body}], callToAction, placeholders:[string]}."},
       {role: "user", content: JSON.stringify({verifiedFacts, gapEvidence: assessment.signals})}
-    ], {temperature: .3});
+    ], {temperature: .3, responseSchema: DEMO_SITE_CONTENT_SCHEMA});
     const content = JSON.parse(raw) as DemoSiteContent;
     content.sections = Array.isArray(content.sections) ? content.sections : [];
     content.placeholders = Array.isArray(content.placeholders) ? content.placeholders : [];

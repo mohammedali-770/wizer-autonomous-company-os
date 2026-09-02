@@ -56,13 +56,32 @@ export type OutreachMessage = {
 
 export type OutreachTouch = {prospectId: string; channel: OutreachChannel; sentAt: string; outcome: "sent" | "bounced" | "replied" | "opted_out"};
 
-export type OutreachPolicy = {
-  senderIdentity: {legalName: string; postalAddress: string; replyToEmail: string; websiteUrl: string};
-  allowedChannels: OutreachChannel[];
-  jurisdictions: Record<string, {unsolicitedBusinessEmail: "opt_out_allowed" | "consent_required"; phoneRequiresRegistryCheck: boolean}>;
-  maxTouchesPerProspect: number; minDaysBetweenTouches: number; quietHours: {startHour: number; endHour: number};
-  dailySendCap: number; requireHumanApproval: boolean;
-};
+export const OutreachPolicy = z.object({
+  senderIdentity: z.object({legalName: z.string().min(1), postalAddress: z.string().min(1), replyToEmail: z.string().email(), websiteUrl: z.string().url()}),
+  allowedChannels: z.array(OutreachChannel).min(1),
+  jurisdictions: z.record(z.string().length(2), z.object({unsolicitedBusinessEmail: z.enum(["opt_out_allowed", "consent_required"]), phoneRequiresRegistryCheck: z.boolean()})),
+  maxTouchesPerProspect: z.number().int().min(1).max(5),
+  minDaysBetweenTouches: z.number().int().min(1),
+  quietHours: z.object({startHour: z.number().int().min(0).max(23), endHour: z.number().int().min(0).max(23)}),
+  dailySendCap: z.number().int().min(1),
+  requireHumanApproval: z.boolean()
+});
+export type OutreachPolicy = z.infer<typeof OutreachPolicy>;
+
+export const DEMO_SITE_CONTENT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["headline", "subheadline", "about", "sections", "callToAction", "placeholders"],
+  properties: {
+    headline: {type: "string"}, subheadline: {type: "string"}, about: {type: "string"},
+    sections: {type: "array", items: {type: "object", additionalProperties: false, required: ["title", "body"], properties: {title: {type: "string"}, body: {type: "string"}}}},
+    callToAction: {type: "string"}, placeholders: {type: "array", items: {type: "string"}}
+  }
+} as const;
+
+export const OUTREACH_COPY_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["subject", "body"],
+  properties: {subject: {type: "string"}, body: {type: "string"}}
+} as const;
 
 export interface SuppressionList {
   contains(input: {companyId: string; value: string}): Promise<boolean>;

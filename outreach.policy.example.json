@@ -1,0 +1,17 @@
+{
+  "senderIdentity": {
+    "legalName": "Your Company Ltd",
+    "postalAddress": "1 Example Street, Manchester M1 1AA, United Kingdom",
+    "replyToEmail": "hello@example.com",
+    "websiteUrl": "https://example.com"
+  },
+  "allowedChannels": ["email"],
+  "jurisdictions": {
+    "GB": {"unsolicitedBusinessEmail": "opt_out_allowed", "phoneRequiresRegistryCheck": true}
+  },
+  "maxTouchesPerProspect": 2,
+  "minDaysBetweenTouches": 7,
+  "quietHours": {"startHour": 20, "endHour": 8},
+  "dailySendCap": 25,
+  "requireHumanApproval": true
+}

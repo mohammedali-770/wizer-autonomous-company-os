@@ -12,7 +12,13 @@ Wizer is an open, provider-neutral foundation for running an AI-native company a
 
 ## Revenue playbooks
 
-The first end-to-end business motion ships in `src/growth`: find businesses whose public listing shows no working website or app, build each a real one-page preview, and offer it to them once, honestly, behind a compliance gate and a human approval boundary. See [docs/PLAYBOOK-WEBSITE-OUTREACH.md](docs/PLAYBOOK-WEBSITE-OUTREACH.md).
+The first end-to-end business motion ships in `src/growth`: find businesses whose public listing shows no working website or app, build each a real one-page preview, and offer it to them once, honestly, behind a compliance gate and a human approval boundary. Runnable adapters live in `src/adapters` (OpenStreetMap discovery, a polite web/app-store probe, Claude, Supabase evidence and approvals, Supabase Storage or local preview hosting, Resend or dry-run delivery) with a CLI in `src/cli`:
+
+```bash
+node dist/src/cli/wizer.js campaign --query bakery --area "Manchester" --country GB --dry-run
+```
+
+See [docs/PLAYBOOK-WEBSITE-OUTREACH.md](docs/PLAYBOOK-WEBSITE-OUTREACH.md).
 
 ## Architecture
 
@@ -23,7 +29,7 @@ Internal Audit has independent read/finding privileges. High-risk actions requir
 ## Start
 
 1. Install Node.js 20+ and run `npm ci`.
-2. Copy `.env.example` to `.env` and add a Supabase URL/publishable key plus server-only secret and model credentials.
+2. Copy `.env.example` to `.env` and add a Supabase URL/publishable key plus server-only secret and model credentials. To run outreach, also copy `outreach.policy.example.json` to `outreach.policy.json` and fill in your legal sender identity and per-country rules.
 3. Link the Supabase CLI project and apply the migrations in `supabase/migrations` in filename order.
 4. Run `npm run check`.
 

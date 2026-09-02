@@ -37,6 +37,25 @@ describe("presence assessment", () => {
     const assessment = await new WebPresenceAssessor(probe({title: "Coming soon", textLength: 40}), null, clock).assess(prospect({declaredWebsite: "https://zahrabakery.co.uk"}));
     expect(assessment.website).toBe("broken");
   });
+  it("does not mistake a script-rendered site for a missing one", async () => {
+    const spa = {resolve: async () => ({resolves: true}), fetch: async (url: string) => ({status: 200, finalUrl: url, title: "Zahra Bakery", textLength: 0, contentLength: 159681, blocked: false})};
+    const assessment = await new WebPresenceAssessor(spa, null, clock).assess(prospect({declaredWebsite: "https://zahrabakery.co.uk"}));
+    expect(assessment.website).toBe("owned");
+    expect(qualify(assessment).qualified).toBe(false);
+  });
+  it("treats a robots-disallowed site as a site that exists", async () => {
+    const blocked = {resolve: async () => ({resolves: true}), fetch: async (url: string) => ({status: 0, finalUrl: url, title: "", textLength: 0, contentLength: 0, blocked: true})};
+    const assessment = await new WebPresenceAssessor(blocked, null, clock).assess(prospect({declaredWebsite: "https://zahrabakery.co.uk"}));
+    expect(assessment.website).toBe("owned");
+    expect(assessment.signals.some(signal => signal.observation.includes("robots.txt"))).toBe(true);
+  });
+  it("holds back when a listed domain resolves but never answers", async () => {
+    const dead = {resolve: async () => ({resolves: true}), fetch: async (url: string) => ({status: 0, finalUrl: url, title: "", textLength: 0, contentLength: 0, blocked: false})};
+    const assessment = await new WebPresenceAssessor(dead, null, clock).assess(prospect({declaredWebsite: "https://zahrabakery.co.uk"}));
+    expect(assessment.website).toBe("broken");
+    expect(qualify(assessment)).toMatchObject({qualified: false});
+    expect(qualify(assessment).reasons[0]).toContain("confidence");
+  });
   it("disqualifies a business that already has a working site", async () => {
     const assessment = await new WebPresenceAssessor(probe(), null, clock).assess(prospect({declaredWebsite: "https://zahrabakery.co.uk"}));
     expect(assessment.website).toBe("owned");

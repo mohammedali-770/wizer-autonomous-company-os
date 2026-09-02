@@ -2,7 +2,7 @@ import type { AppPresence, BusinessProspect, PresenceAssessment, PresenceSignal,
 
 export interface WebProbe {
   resolve(hostname: string): Promise<{resolves: boolean}>;
-  fetch(url: string): Promise<{status: number; finalUrl: string; title: string; textLength: number}>;
+  fetch(url: string): Promise<{status: number; finalUrl: string; title: string; textLength: number; contentLength?: number; blocked?: boolean}>;
 }
 export interface AppDirectory {
   search(input: {name: string; locality: string; countryCode: string}): Promise<Array<{store: "apple" | "google"; title: string; publisher: string; url: string}>>;
@@ -13,6 +13,7 @@ const PLATFORM_HOSTS = ["business.site", "wixsite.com", "godaddysites.com", "squ
 const PARKED_MARKERS = ["domain for sale", "buy this domain", "parked", "coming soon", "under construction", "default web page", "index of /"];
 const GAP_BY_PRESENCE: Record<WebsitePresence, number> = {none: 1, broken: .9, social_only: .72, platform_hosted: .38, owned: .05};
 const BASE_CONFIDENCE: Record<WebsitePresence, number> = {none: .62, broken: .85, social_only: .88, platform_hosted: .85, owned: .9};
+const THIN_TEXT = 250, THIN_BYTES = 4000;
 
 const hostOf = (value: string) => { try { return new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).hostname.toLowerCase().replace(/^www\./, ""); } catch { return null; } };
 const matchesHost = (host: string, list: string[]) => list.some(known => host === known || host.endsWith(`.${known}`));
@@ -22,29 +23,46 @@ const overlap = (a: string, b: string) => { const left = tokens(a), right = toke
 export class WebPresenceAssessor {
   constructor(private readonly probe: WebProbe, private readonly apps: AppDirectory | null = null, private readonly clock: () => Date = () => new Date()) {}
 
-  private async assessWebsite(prospect: BusinessProspect, signals: PresenceSignal[]): Promise<{presence: WebsitePresence}> {
+  private async assessWebsite(prospect: BusinessProspect, signals: PresenceSignal[]): Promise<{presence: WebsitePresence; penalty: number}> {
     const at = this.clock().toISOString();
     if (!prospect.declaredWebsite) {
       signals.push({kind: "directory_field", observation: `${prospect.source} lists no website for this business`, evidenceUrl: null, observedAt: at});
       if (prospect.socialProfiles.length) signals.push({kind: "social", observation: `Only social profiles found: ${prospect.socialProfiles.map(profile => profile.network).join(", ")}`, evidenceUrl: prospect.socialProfiles[0]?.url ?? null, observedAt: at});
-      return {presence: prospect.socialProfiles.length ? "social_only" : "none"};
+      return {presence: prospect.socialProfiles.length ? "social_only" : "none", penalty: 0};
     }
     const host = hostOf(prospect.declaredWebsite);
-    if (!host) { signals.push({kind: "directory_field", observation: `Listed website "${prospect.declaredWebsite}" is not a usable URL`, evidenceUrl: null, observedAt: at}); return {presence: "broken"}; }
-    if (matchesHost(host, SOCIAL_HOSTS)) { signals.push({kind: "social", observation: `Listed website points at a social or link-in-bio page (${host})`, evidenceUrl: prospect.declaredWebsite, observedAt: at}); return {presence: "social_only"}; }
+    if (!host) { signals.push({kind: "directory_field", observation: `Listed website "${prospect.declaredWebsite}" is not a usable URL`, evidenceUrl: null, observedAt: at}); return {presence: "broken", penalty: 0}; }
+    if (matchesHost(host, SOCIAL_HOSTS)) { signals.push({kind: "social", observation: `Listed website points at a social or link-in-bio page (${host})`, evidenceUrl: prospect.declaredWebsite, observedAt: at}); return {presence: "social_only", penalty: 0}; }
     const dns = await this.probe.resolve(host);
     signals.push({kind: "dns", observation: dns.resolves ? `${host} resolves` : `${host} does not resolve`, evidenceUrl: null, observedAt: at});
-    if (!dns.resolves) return {presence: "broken"};
+    if (!dns.resolves) return {presence: "broken", penalty: 0};
     const response = await this.probe.fetch(prospect.declaredWebsite);
-    signals.push({kind: "http", observation: `HTTP ${response.status} from ${response.finalUrl}`, evidenceUrl: response.finalUrl, observedAt: at});
-    if (response.status >= 400 || response.status === 0) return {presence: "broken"};
-    const parked = PARKED_MARKERS.some(marker => response.title.toLowerCase().includes(marker)) || response.textLength < 400;
-    signals.push({kind: "content", observation: parked ? `Page looks parked or empty (title "${response.title}", ${response.textLength} chars of text)` : `Page returns real content (${response.textLength} chars of text)`, evidenceUrl: response.finalUrl, observedAt: at});
-    if (parked) return {presence: "broken"};
+    if (response.blocked) {
+      signals.push({kind: "http", observation: `${host} publishes a robots.txt that disallows our probe, so a site exists and we did not read it`, evidenceUrl: prospect.declaredWebsite, observedAt: at});
+      return {presence: "owned", penalty: 0};
+    }
+    signals.push({kind: "http", observation: response.status === 0 ? `${host} resolves but returned no HTTP response` : `HTTP ${response.status} from ${response.finalUrl}`, evidenceUrl: response.finalUrl, observedAt: at});
+    if (response.status === 0) return {presence: "broken", penalty: .3};
+    if (response.status >= 400) return {presence: "broken", penalty: 0};
+    const bytes = response.contentLength ?? response.textLength;
+    const parkedMarker = PARKED_MARKERS.find(marker => response.title.toLowerCase().includes(marker));
+    if (parkedMarker) {
+      signals.push({kind: "content", observation: `Page looks parked (title "${response.title}")`, evidenceUrl: response.finalUrl, observedAt: at});
+      return {presence: "broken", penalty: 0};
+    }
+    if (response.textLength < THIN_TEXT && bytes < THIN_BYTES) {
+      signals.push({kind: "content", observation: `Page is a near-empty placeholder (${response.textLength} chars of text in ${bytes} bytes)`, evidenceUrl: response.finalUrl, observedAt: at});
+      return {presence: "broken", penalty: 0};
+    }
+    if (response.textLength < THIN_TEXT) {
+      signals.push({kind: "content", observation: `Page renders its content with scripts (${bytes} bytes, ${response.textLength} chars of readable text); treating it as a working website we could not read`, evidenceUrl: response.finalUrl, observedAt: at});
+      return {presence: "owned", penalty: 0};
+    }
+    signals.push({kind: "content", observation: `Page returns real content (${response.textLength} chars of text)`, evidenceUrl: response.finalUrl, observedAt: at});
     const finalHost = hostOf(response.finalUrl) ?? host;
-    if (matchesHost(finalHost, SOCIAL_HOSTS)) return {presence: "social_only"};
-    if (matchesHost(finalHost, PLATFORM_HOSTS)) return {presence: "platform_hosted"};
-    return {presence: "owned"};
+    if (matchesHost(finalHost, SOCIAL_HOSTS)) return {presence: "social_only", penalty: 0};
+    if (matchesHost(finalHost, PLATFORM_HOSTS)) return {presence: "platform_hosted", penalty: 0};
+    return {presence: "owned", penalty: 0};
   }
 
   private async assessApp(prospect: BusinessProspect, signals: PresenceSignal[]): Promise<AppPresence> {
@@ -62,7 +80,7 @@ export class WebPresenceAssessor {
     const app = await this.assessApp(prospect, signals);
     const gapScore = Math.min(1, GAP_BY_PRESENCE[website.presence] + (app === "none" && website.presence !== "owned" ? .02 : 0));
     const corroboration = new Set(signals.map(signal => signal.kind)).size;
-    const confidence = Math.min(1, BASE_CONFIDENCE[website.presence] + (corroboration - 1) * .04);
+    const confidence = Math.max(0, Math.min(1, BASE_CONFIDENCE[website.presence] + (corroboration - 1) * .04 - website.penalty));
     return {prospectId: prospect.id, website: website.presence, app, gapScore, confidence, signals, assessedAt: this.clock().toISOString()};
   }
 }

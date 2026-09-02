@@ -1,6 +1,6 @@
 import type { ReasoningModel } from "../domain.js";
 import type { IntegrationGateway } from "../integrations.js";
-import type { BusinessProspect, ContactPoint, DemoSite, OutreachMessage, OutreachPolicy, PresenceAssessment } from "./domain.js";
+import { OUTREACH_COPY_SCHEMA, type BusinessProspect, type ContactPoint, type DemoSite, type OutreachMessage, type OutreachPolicy, type PresenceAssessment } from "./domain.js";
 
 const FORBIDDEN_CLAIMS: Array<{pattern: RegExp; description: string}> = [
   {pattern: /\bas (?:you )?requested\b|\byou asked (?:us )?(?:for|to)\b/i, description: "implies the business commissioned this work"},
@@ -34,7 +34,7 @@ export class OutreachComposer {
     const raw = await this.model.complete([
       {role: "system", content: `You write one short, honest first-contact message from ${this.policy.senderIdentity.legalName} to a small business that has no working website. Say plainly that this is an unrequested message, that you built a free one-page preview from their public listing, and that they can have it, change it, or ignore it. No hype, no urgency, no claims about their business, no suggestion they asked for this or that anything was published in their name. Under 120 words, plain text, no links (the link is appended for you). Return only JSON: {subject, body}.`},
       {role: "user", content: JSON.stringify({business: {name: prospect.name, category: prospect.category, locality: prospect.address.locality}, whyContacted: assessment.signals.map(signal => signal.observation), previewHeadline: site.content.headline, openQuestions: site.content.placeholders})}
-    ], {temperature: .4});
+    ], {temperature: .4, responseSchema: OUTREACH_COPY_SCHEMA});
     const copy = JSON.parse(raw) as {subject: string; body: string};
     const violations = validateOutreachCopy(copy);
     if (violations.length) throw new Error(`Outreach copy rejected: ${violations.join("; ")}`);
