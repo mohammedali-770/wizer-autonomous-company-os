@@ -264,3 +264,132 @@ describe("json intent is a directive, not a keyword",()=>{
     }
   });
 });
+
+describe("context overflow is loud by default",()=>{
+  it("refuses server side prompt shifting so evidence is never silently dropped",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body.shift).toBe(false);
+    expect(calls[0]!.body.truncate).toBe(false);
+  });
+  it("puts shift and truncate at the top level where ollama reads them",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body.options.shift).toBeUndefined();
+  });
+  it("restores the old behaviour on request",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl,contextOverflow:"shift"}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body).toMatchObject({shift:true,truncate:true});
+  });
+  it("warms up with the same overflow setting so the runner is not reloaded",async()=>{
+    const {impl,calls}=fakeFetch(reply(""));
+    await new OllamaReasoningModel({fetch:impl,contextOverflow:"shift"}).warmup();
+    expect(calls[0]!.body).toMatchObject({shift:true,truncate:true});
+  });
+  it("explains a context length rejection in terms of numCtx",async()=>{
+    const {impl}=fakeFetch(new Response(JSON.stringify({error:"input is longer than the context length"}),{status:400}));
+    await expect(new OllamaReasoningModel({fetch:impl,numCtx:2048}).complete(PROSE_PROMPT,{})).rejects.toThrow(/longer than numCtx \(2048\)/);
+  });
+});
+
+describe("generation budget",()=>{
+  it("always sends a finite num_predict rather than inheriting ollama's ten times context budget",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body.options.num_predict).toBe(1024);
+  });
+  it("doubles the budget and retries rather than scolding a model that was merely interrupted",async()=>{
+    const {impl,calls}=fakeFetch(reply('{"objective":"tr',{done_reason:"length"}),reply('{"objective":"ship"}'));
+    expect(JSON.parse(await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{}))).toEqual({objective:"ship"});
+    expect(calls[1]!.body.options.num_predict).toBe(2048);
+    expect(calls[1]!.body.messages).toHaveLength(2);
+  });
+});
+
+describe("thinking",()=>{
+  it("disables thinking on json calls because it corrupts constrained output",async()=>{
+    const {impl,calls}=fakeFetch(reply('{"a":1}'));
+    await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{});
+    expect(calls[0]!.body.think).toBe(false);
+  });
+  it("leaves a configured think value alone on prose calls",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl,think:true}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body.think).toBe(true);
+  });
+});
+
+describe("node fetch ceiling",()=>{
+  it("names the built in 300s limit that timeoutMs cannot raise",async()=>{
+    const {impl}=fakeFetch(()=>{const error=new TypeError("fetch failed");(error as any).cause={code:"UND_ERR_HEADERS_TIMEOUT"};throw error});
+    await expect(new OllamaReasoningModel({fetch:impl,timeoutMs:900_000}).complete(PROSE_PROMPT,{})).rejects.toThrow(/Node's built-in 300s fetch timeout.*dispatcher/s);
+  });
+  it("passes a dispatcher through to fetch",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    const dispatcher={marker:true};
+    await new OllamaReasoningModel({fetch:impl,dispatcher}).complete(PROSE_PROMPT,{});
+    expect((calls[0]!.init as any).dispatcher).toBe(dispatcher);
+  });
+});
+
+describe("environment host handling",()=>{
+  it("rewrites the bind address operators are told to set on the board",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await ollamaFromEnv({OLLAMA_HOST:"0.0.0.0:11434"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.url).toBe("http://127.0.0.1:11434/api/chat");
+  });
+  it("adds the default port to a bare host",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await ollamaFromEnv({OLLAMA_HOST:"raspberrypi.local"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.url).toBe("http://raspberrypi.local:11434/api/chat");
+  });
+  it("keeps an explicit scheme and port",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await ollamaFromEnv({OLLAMA_HOST:"https://ollama.example:8443"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.url).toBe("https://ollama.example:8443/api/chat");
+  });
+  it("prefers an explicit base url over the host variable",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await ollamaFromEnv({OLLAMA_HOST:"0.0.0.0:11434",OLLAMA_BASE_URL:"http://pi:1234"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.url).toBe("http://pi:1234/api/chat");
+  });
+});
+
+describe("schema handling",()=>{
+  it("instructs the model when a schema is supplied but the prompt says nothing",async()=>{
+    const {impl,calls}=fakeFetch(reply('{"a":1}'));
+    await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{responseSchema:{type:"object",properties:{a:{type:"number"}}}});
+    expect(calls[0]!.body.messages).toHaveLength(3);
+    expect(calls[0]!.body.messages[2].content).toMatch(/one JSON object and nothing else/);
+  });
+  it("does not add an instruction when the prompt already carries one",async()=>{
+    const {impl,calls}=fakeFetch(reply('{"a":1}'));
+    await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{});
+    expect(calls[0]!.body.messages).toHaveLength(2);
+  });
+  it("falls back to plain json mode for a schema ollama could not compile",async()=>{
+    const {impl,calls}=fakeFetch(reply('{"a":1}'));
+    await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{responseSchema:{type:"object",properties:{a:{$ref:"#/definitions/x"}}}});
+    expect(calls[0]!.body.format).toBe("json");
+  });
+  it("uses a zod schema to pick the right candidate out of prose",async()=>{
+    const {impl}=fakeFetch(reply('Draft: {"objective":123456789012345} Final: {"objective":"ship"}'));
+    const schema=z.object({objective:z.string()});
+    expect(JSON.parse(await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{responseSchema:schema}))).toEqual({objective:"ship"});
+  });
+  it("reports a shape mismatch differently from missing json",async()=>{
+    const {impl}=fakeFetch(reply('{"objective":123}'));
+    const schema=z.object({objective:z.string()});
+    await expect(new OllamaReasoningModel({fetch:impl,maxAttempts:1}).complete(JSON_PROMPT,{responseSchema:schema})).rejects.toThrow(/expected string|Expected string/);
+  });
+});
+
+describe("calibration stats",()=>{
+  it("exposes prefill and generation timings so a board can be measured",async()=>{
+    const {impl}=fakeFetch(reply("ok",{prompt_eval_count:900,eval_count:120,load_duration:3e9,prompt_eval_duration:30e9,eval_duration:45e9,total_duration:78e9,done_reason:"stop"}));
+    const model=new OllamaReasoningModel({fetch:impl});
+    await model.complete(PROSE_PROMPT,{});
+    expect(model.lastStats()).toEqual({model:"llama3.2:3b",promptTokens:900,completionTokens:120,loadMs:3000,promptEvalMs:30000,evalMs:45000,totalMs:78000,doneReason:"stop"});
+  });
+});
