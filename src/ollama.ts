@@ -152,9 +152,11 @@ export class OllamaReasoningModel implements ReasoningModel {
         headers:{...(body===undefined?{}:{"content-type":"application/json"}),...this.headers},
         ...(body===undefined?{}:{body:JSON.stringify(body)}),
         signal,
+        redirect:"manual",
         ...(this.dispatcher===undefined?{}:{dispatcher:this.dispatcher})
       } as unknown as RequestInit);
       text=await response.text();
+      if(response.status>=300&&response.status<400) throw new OllamaHttpError(`Ollama at ${this.baseUrl} answered with a ${response.status} redirect; refusing to forward the prompt or any configured header to another host`);
       if(!response.ok){
         const detail=(()=>{try{return String((JSON.parse(text) as {error?:unknown}).error??text)}catch{return text}})().slice(0,500);
         if(response.status===404&&/model/i.test(detail)) throw new OllamaHttpError(`Ollama has not pulled that model: ${detail}. Run: ollama pull <model>`);

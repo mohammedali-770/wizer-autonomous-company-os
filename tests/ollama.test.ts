@@ -12,6 +12,7 @@ const fakeFetch=(...replies:Array<Response|(()=>Response|Promise<Response>)>)=>{
   }) as unknown as typeof fetch;
   return {impl,calls};
 };
+const rejection=(promise:Promise<unknown>):Promise<Error>=>promise.then(()=>{throw new Error("expected a rejection but the call resolved")},(error:Error)=>error);
 const JSON_PROMPT=[{role:"system" as const,content:"Return only JSON matching WorkProposal."},{role:"user" as const,content:"{}"}];
 const PROSE_PROMPT=[{role:"system" as const,content:"Speak as Ali, CEO. Disagree honestly."},{role:"user" as const,content:"agenda"}];
 
@@ -39,7 +40,7 @@ describe("json mode detection",()=>{
   });
   it("never inspects user content for the json hint",async()=>{
     const {impl,calls}=fakeFetch(reply("prose"));
-    await new OllamaReasoningModel({fetch:impl}).complete([{role:"system",content:"Speak freely."},{role:"user",content:"the customer asked about our JSON export"}],{});
+    await new OllamaReasoningModel({fetch:impl}).complete([{role:"system",content:"Speak freely."},{role:"user",content:"Ops asked us to return the JSON export by Friday"}],{});
     expect(calls[0]!.body.format).toBeUndefined();
   });
   it("honours an explicit jsonMode override",async()=>{
@@ -68,6 +69,16 @@ describe("small model repair",()=>{
   it("strips reasoning traces from prose replies too",async()=>{
     const {impl}=fakeFetch(reply("<think>hmm</think>We should hold the launch."));
     expect(await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{})).toBe("We should hold the launch.");
+  });
+  it("retries rather than letting a blank contribution enter a meeting transcript",async()=>{
+    const {impl,calls}=fakeFetch(reply("   \n  "),reply("We should hold the launch."));
+    expect(await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{})).toBe("We should hold the launch.");
+    expect(calls).toHaveLength(2);
+  });
+  it("gives up on a prose call that stays blank",async()=>{
+    const {impl,calls}=fakeFetch(reply("   \n  "));
+    await expect(new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{})).rejects.toThrow(/model returned an empty reply/);
+    expect(calls).toHaveLength(2);
   });
   it("retries once with a corrective turn and zero temperature",async()=>{
     const {impl,calls}=fakeFetch(reply("I cannot do that"),reply('{"objective":"ship"}'));
@@ -98,6 +109,13 @@ describe("request shape",()=>{
     expect(calls[0]!.url).toBe("http://127.0.0.1:11434/api/chat");
     expect(calls[0]!.body).toMatchObject({model:"llama3.2:3b",stream:false,keep_alive:"30m",options:{num_ctx:4096,temperature:0.2}});
     expect(calls[0]!.body.think).toBeUndefined();
+    expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
+  });
+  it("actually abandons a request that never answers",async()=>{
+    const impl=((_input:unknown,init:{signal:AbortSignal})=>new Promise((_resolve,reject)=>{
+      init.signal.addEventListener("abort",()=>{const error=new Error("aborted");error.name="TimeoutError";reject(error)});
+    })) as unknown as typeof fetch;
+    await expect(new OllamaReasoningModel({fetch:impl,timeoutMs:50}).complete(PROSE_PROMPT,{})).rejects.toThrow(/did not answer within 50ms/);
   });
   it("lets the agent model policy pick the model",async()=>{
     const {impl,calls}=fakeFetch(reply("ok"));
@@ -149,11 +167,38 @@ describe("operational errors",()=>{
     const {impl}=fakeFetch(reply('{"objective":"tr',{done_reason:"length"}));
     await expect(new OllamaReasoningModel({fetch:impl,maxAttempts:1}).complete(JSON_PROMPT,{})).rejects.toThrow(/output limit/);
   });
-  it("never puts credentials in an error message",async()=>{
-    const {impl}=fakeFetch(new Response("boom",{status:500}));
-    const model=new OllamaReasoningModel({fetch:impl,headers:{authorization:"Bearer super-secret"}});
-    await expect(model.complete(PROSE_PROMPT,{})).rejects.toThrow(/failed with 500/);
-    await model.complete(PROSE_PROMPT,{}).catch((error:Error)=>expect(error.message).not.toContain("super-secret"));
+  it("refuses a redirect rather than forwarding the prompt to another host",async()=>{
+    const {impl}=fakeFetch(new Response("",{status:307,headers:{location:"http://elsewhere.example/api/chat"}}));
+    await expect(new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{})).rejects.toThrow(/307 redirect; refusing to forward/);
+  });
+  it("asks fetch not to follow redirects at all",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{});
+    expect((calls[0]!.init as any).redirect).toBe("manual");
+  });
+  it("reports an error delivered with a 200 status instead of burning the retry budget",async()=>{
+    const {impl,calls}=fakeFetch(new Response(JSON.stringify({model:"m",error:"model requires more system memory than is available"}),{status:200}));
+    await expect(new OllamaReasoningModel({fetch:impl}).complete(PROSE_PROMPT,{})).rejects.toThrow(/reported an error: model requires more system memory/);
+    expect(calls).toHaveLength(1);
+  });
+  it("never puts credentials in any error message",async()=>{
+    const secret="Bearer super-secret";
+    const branches:Array<[string,Response|(()=>Response)]>=[
+      ["unreachable",()=>{throw new TypeError("fetch failed")}],
+      ["timeout",()=>{const error=new Error("t");error.name="TimeoutError";throw error}],
+      ["model missing",new Response(JSON.stringify({error:"model 'x' not found"}),{status:404})],
+      ["server error",new Response("boom",{status:500})],
+      ["redirect",new Response("",{status:307,headers:{location:"http://elsewhere.example"}})],
+      ["non json body",new Response("<html>proxy</html>",{status:200})],
+      ["reported error",new Response(JSON.stringify({error:"out of memory"}),{status:200})]
+    ];
+    for(const [name,response] of branches){
+      const {impl}=fakeFetch(response);
+      const model=new OllamaReasoningModel({fetch:impl,maxAttempts:1,headers:{authorization:secret,"x-api-key":"proxy-key-abc"}});
+      const error=await rejection(model.complete(PROSE_PROMPT,{}));
+      expect(error.message,name).not.toContain("super-secret");
+      expect(error.message,name).not.toContain("proxy-key-abc");
+    }
   });
 });
 
@@ -168,8 +213,18 @@ describe("operations helpers",()=>{
     await new OllamaReasoningModel({fetch:impl}).warmup("qwen3:4b");
     expect(calls[0]!.body).toMatchObject({model:"qwen3:4b",messages:[],keep_alive:"30m"});
   });
-  it("builds from the environment without reading real process env",()=>{
-    expect(ollamaFromEnv({OLLAMA_BASE_URL:"http://pi:11434",LLM_MODEL:"qwen3:4b",OLLAMA_NUM_CTX:"2048"})).toBeInstanceOf(OllamaReasoningModel);
+  it("puts every environment mapping on the wire",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await ollamaFromEnv({OLLAMA_BASE_URL:"http://pi:11434",LLM_MODEL:"qwen3:4b",OLLAMA_NUM_CTX:"2048",OLLAMA_NUM_PREDICT:"256",LLM_API_KEY:"k"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.url).toBe("http://pi:11434/api/chat");
+    expect(calls[0]!.body.model).toBe("qwen3:4b");
+    expect(calls[0]!.body.options).toMatchObject({num_ctx:2048,num_predict:256});
+    expect(calls[0]!.init.headers).toMatchObject({authorization:"Bearer k"});
+  });
+  it("sends configured headers on every request",async()=>{
+    const {impl,calls}=fakeFetch(reply("ok"));
+    await new OllamaReasoningModel({fetch:impl,headers:{"x-api-key":"abc"}}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.init.headers).toMatchObject({"x-api-key":"abc","content-type":"application/json"});
   });
 });
 
