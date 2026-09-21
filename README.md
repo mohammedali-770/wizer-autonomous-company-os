@@ -25,6 +25,42 @@ Internal Audit has independent read/finding privileges. High-risk actions requir
 
 The core deliberately exposes interfaces rather than binding Wizer to one LLM or integration vendor. Implement `ReasoningModel`, `Store`, and `IntegrationAdapter` for deployment.
 
+## Local models (Ollama)
+
+`OllamaReasoningModel` is a dependency-free `ReasoningModel` for an Ollama server, including one running on a Raspberry Pi on the same network. It is written for small quantized models, where the constraint is not capability but patience and JSON discipline.
+
+```ts
+import { AgentRuntime, OllamaReasoningModel } from "wizer-autonomous-company-os";
+
+const model = new OllamaReasoningModel({ baseUrl: "http://raspberrypi.local:11434", model: "qwen3:4b" });
+await model.warmup();
+const runtime = new AgentRuntime(model, store);
+```
+
+`ollamaFromEnv()` builds the same object from `OLLAMA_BASE_URL`, `LLM_MODEL`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_CTX`, `OLLAMA_TIMEOUT_MS`, and `LLM_API_KEY`.
+
+| Option | Default | Reason |
+| --- | --- | --- |
+| `baseUrl` | `http://127.0.0.1:11434` | Ollama's default listener; set `OLLAMA_HOST=0.0.0.0:11434` on the board to reach it over the network. |
+| `model` | `llama3.2:3b` | Fits a 4 GB board and still returns structured JSON. |
+| `timeoutMs` | `600000` | A cold model load plus a long context on CPU can exceed five minutes. |
+| `keepAlive` | `"30m"` | Keeps the model resident so the next call does not pay the load again. |
+| `numCtx` | `4096` | Context costs RAM on a board that has little; raise deliberately. |
+| `temperature` | `0.2` | Structured output degrades quickly as temperature rises. |
+| `jsonMode` | `"auto"` | See below. `"always"` and `"never"` override the inference. |
+| `maxAttempts` | `2` | One corrective retry, because each attempt costs minutes. |
+| `serialize` | `true` | Concurrent inference on one board causes swapping. |
+| `think` | unset | Only sent when set, since models that cannot reason reject the field. |
+| `headers` | `{}` | For an authenticating reverse proxy in front of Ollama. |
+| `fetch` | global | Injection point for tests. |
+
+Behaviour worth knowing:
+
+- **JSON mode is inferred, not assumed.** `AgentRuntime.deliberate`, the meeting synthesis, and `OrganizationDesigner.propose` each `JSON.parse` the reply and each say "JSON" in their system prompt; the meeting contribution that must stay prose does not. The adapter turns on Ollama's constrained JSON decoding for exactly those calls, and reads only system messages so that company data containing the word cannot flip the mode.
+- **Replies are repaired before they are returned.** Reasoning traces, markdown fences, and surrounding prose are stripped, then the outermost balanced JSON value is extracted with string and escape awareness. A reply that still fails to parse is retried at temperature zero with the parse error fed back to the model.
+- **A `responseSchema` is used.** A JSON Schema is forwarded to Ollama for constrained decoding; a zod schema enables JSON mode and validates the result, and a validation failure is retried like a parse failure.
+- **Failures say what to do next.** An unreachable server, an unpulled model, a timeout, and an answer truncated by the output limit each raise a distinct, actionable error. Credentials never appear in an error message.
+
 ## Safety and operating model
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/CONSTITUTION.md](docs/CONSTITUTION.md), and [docs/SECURITY.md](docs/SECURITY.md). This repository is a production-quality foundation, not a claim that an unattended company should control funds, contracts, employment, or production deletion without configured human approval.
