@@ -1,6 +1,6 @@
 import {describe,expect,it,vi} from "vitest";
 import {z} from "zod";
-import {AgentRuntime,APPROVED_AGENTS,OllamaReasoningModel,ollamaFromEnv,recoverJson,type Store} from "../src/index.js";
+import {AgentRuntime,APPROVED_AGENTS,ExecutiveMeetingRoom,OllamaReasoningModel,OrganizationDesigner,ollamaFromEnv,recoverJson,type CompanyContext,type Store} from "../src/index.js";
 
 const store:Store={query:async<T>()=>({} as T),append:vi.fn(async()=>{})};
 const reply=(content:string,extra:Record<string,unknown>={})=>new Response(JSON.stringify({model:"m",message:{role:"assistant",content},done:true,...extra}),{status:200,headers:{"content-type":"application/json"}});
@@ -391,5 +391,26 @@ describe("calibration stats",()=>{
     const model=new OllamaReasoningModel({fetch:impl});
     await model.complete(PROSE_PROMPT,{});
     expect(model.lastStats()).toEqual({model:"llama3.2:3b",promptTokens:900,completionTokens:120,loadMs:3000,promptEvalMs:30000,evalMs:45000,totalMs:78000,doneReason:"stop"});
+  });
+});
+
+describe("the real call sites decide json mode, not a copy of their prompts",()=>{
+  const context:CompanyContext={companyId:"c",generatedAt:"now",constitution:[],strategy:{},organization:{},operations:{},finance:{},customers:{},product:{},risks:{},recentEvents:[],decisions:[],openQuestions:[]};
+  it("keeps a meeting contribution in prose and constrains only the synthesis",async()=>{
+    const {impl,calls}=fakeFetch(reply("Growth is being funded ahead of retention."),reply('{"decisions":["hold"],"dissent":[]}'));
+    const room=new ExecutiveMeetingRoom(new OllamaReasoningModel({fetch:impl}),store);
+    const result=await room.convene({topic:"Q3 allocation",context,participants:[APPROVED_AGENTS[0]!]});
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.format).toBeUndefined();
+    expect(calls[0]!.body.think).toBeUndefined();
+    expect(calls[1]!.body.format).toBe("json");
+    expect(calls[1]!.body.think).toBe(false);
+    expect(result.synthesis).toEqual({decisions:["hold"],dissent:[]});
+  });
+  it("constrains an organization proposal",async()=>{
+    const {impl,calls}=fakeFetch(reply('```json\n{"action":"hire","role":"Support Lead"}\n```'));
+    const designer=new OrganizationDesigner(new OllamaReasoningModel({fetch:impl}),store);
+    expect(await designer.propose(context,{gap:"support backlog"})).toEqual({action:"hire",role:"Support Lead"});
+    expect(calls[0]!.body.format).toBe("json");
   });
 });
