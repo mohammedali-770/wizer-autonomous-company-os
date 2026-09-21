@@ -184,3 +184,83 @@ describe("wired into the runtime",()=>{
     expect(calls[0]!.body.format).toBe("json");
   });
 });
+
+describe("recovery hardening",()=>{
+  it("prefers the real answer over a stray object emitted first",()=>
+    expect(recoverJson('Thinking: {"status":"ok"}\nFinal: {"objective":"real answer"}')).toEqual({objective:"real answer"}));
+  it("refuses a bare scalar instead of passing null to a caller",()=>{
+    expect(()=>recoverJson("null")).toThrow(/object or array/);
+    expect(()=>recoverJson("42")).toThrow(/object or array/);
+  });
+  it("reports truncation instead of returning an inner fragment",()=>
+    expect(()=>recoverJson('{"a":{"b":1}')).toThrow(/malformed or truncated/));
+  it("keeps a reply that merely mentions the closing think tag",async()=>{
+    const {impl}=fakeFetch(reply('{"note":"use </think> to close"}'));
+    expect(JSON.parse(await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{}))).toEqual({note:"use </think> to close"});
+  });
+  it("strips reasoning tags whatever their case",async()=>{
+    const {impl}=fakeFetch(reply('<THINK>x</THINK>{"a":1}'));
+    expect(JSON.parse(await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{}))).toEqual({a:1});
+  });
+  it("retries when a reasoning tag is never closed",async()=>{
+    const {impl,calls}=fakeFetch(reply("<think>planning forever"),reply('{"a":1}'));
+    expect(JSON.parse(await new OllamaReasoningModel({fetch:impl}).complete(JSON_PROMPT,{}))).toEqual({a:1});
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("configuration hardening",()=>{
+  it("falls back to defaults rather than skipping the request on unusable numbers",async()=>{
+    const {impl,calls}=fakeFetch(reply("hi"));
+    expect(await new OllamaReasoningModel({fetch:impl,maxAttempts:NaN,timeoutMs:NaN,numCtx:0}).complete(PROSE_PROMPT,{})).toBe("hi");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body.options.num_ctx).toBe(4096);
+  });
+  it("preloads at the same context the real calls will use",async()=>{
+    const {impl,calls}=fakeFetch(reply(""));
+    await new OllamaReasoningModel({fetch:impl,numCtx:8192}).warmup();
+    expect(calls[0]!.body.options).toEqual({num_ctx:8192});
+  });
+  it("coerces a numeric keep_alive from the environment",async()=>{
+    const {impl,calls}=fakeFetch(reply("hi"));
+    await ollamaFromEnv({OLLAMA_KEEP_ALIVE:"-1"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body.keep_alive).toBe(-1);
+  });
+  it("keeps a duration keep_alive as a string",async()=>{
+    const {impl,calls}=fakeFetch(reply("hi"));
+    await ollamaFromEnv({OLLAMA_KEEP_ALIVE:"45m"},{fetch:impl}).complete(PROSE_PROMPT,{});
+    expect(calls[0]!.body.keep_alive).toBe("45m");
+  });
+  it("serializes warmup and models alongside completions",async()=>{
+    let live=0,peak=0;
+    const impl=(async()=>{live++;peak=Math.max(peak,live);await new Promise(resolve=>setTimeout(resolve,5));live--;return reply("ok")}) as unknown as typeof fetch;
+    const model=new OllamaReasoningModel({fetch:impl});
+    await Promise.all([model.complete(PROSE_PROMPT,{}),model.warmup(),model.models().catch(()=>[])]);
+    expect(peak).toBe(1);
+  });
+  it("clears stats so a failed call cannot report the previous one",async()=>{
+    const {impl}=fakeFetch(reply("ok",{prompt_eval_count:5}),new Response("boom",{status:500}));
+    const model=new OllamaReasoningModel({fetch:impl,maxAttempts:1});
+    await model.complete(PROSE_PROMPT,{});
+    expect(model.lastStats()).not.toBeNull();
+    await model.complete(PROSE_PROMPT,{}).catch(()=>{});
+    expect(model.lastStats()).toBeNull();
+  });
+});
+
+describe("json intent is a directive, not a keyword",()=>{
+  it("leaves the meeting prose call alone when agent data mentions json",async()=>{
+    const {impl,calls}=fakeFetch(reply("I disagree with the launch date."));
+    const system='Speak as Lina, Data & Intelligence, using this distinct reasoning personality: {"worldview":"every metric needs JSON-schema provenance"}. Disagree honestly.';
+    expect(await new OllamaReasoningModel({fetch:impl}).complete([{role:"system",content:system},{role:"user",content:"agenda"}],{})).toBe("I disagree with the launch date.");
+    expect(calls[0]!.body.format).toBeUndefined();
+  });
+  it("still recognises every call site that parses its reply",async()=>{
+    const sites=["Generate work at runtime; never use canned scenarios or answers. Return only JSON matching WorkProposal. Constitution is binding.","Synthesize this executive discussion into decisions, dissent, assumptions, owners, deadlines, and unresolved questions. Do not erase minority views. Return JSON.","You are the People function. Return JSON with action, role, mandate, evidence, alternatives, cost, successMeasures, reviewDate."];
+    for(const system of sites){
+      const {impl,calls}=fakeFetch(reply('{"a":1}'));
+      await new OllamaReasoningModel({fetch:impl}).complete([{role:"system",content:system}],{});
+      expect(calls[0]!.body.format).toBe("json");
+    }
+  });
+});

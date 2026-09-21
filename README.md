@@ -49,6 +49,7 @@ const runtime = new AgentRuntime(model, store);
 | `temperature` | `0.2` | Structured output degrades quickly as temperature rises. |
 | `jsonMode` | `"auto"` | See below. `"always"` and `"never"` override the inference. |
 | `maxAttempts` | `2` | One corrective retry, because each attempt costs minutes. |
+| | | Unusable numeric options fall back to these defaults rather than disabling the request. |
 | `serialize` | `true` | Concurrent inference on one board causes swapping. |
 | `think` | unset | Only sent when set, since models that cannot reason reject the field. |
 | `headers` | `{}` | For an authenticating reverse proxy in front of Ollama. |
@@ -56,8 +57,8 @@ const runtime = new AgentRuntime(model, store);
 
 Behaviour worth knowing:
 
-- **JSON mode is inferred, not assumed.** `AgentRuntime.deliberate`, the meeting synthesis, and `OrganizationDesigner.propose` each `JSON.parse` the reply and each say "JSON" in their system prompt; the meeting contribution that must stay prose does not. The adapter turns on Ollama's constrained JSON decoding for exactly those calls, and reads only system messages so that company data containing the word cannot flip the mode.
-- **Replies are repaired before they are returned.** Reasoning traces, markdown fences, and surrounding prose are stripped, then the outermost balanced JSON value is extracted with string and escape awareness. A reply that still fails to parse is retried at temperature zero with the parse error fed back to the model.
+- **JSON mode is inferred, not assumed.** `AgentRuntime.deliberate`, the meeting synthesis, and `OrganizationDesigner.propose` each `JSON.parse` the reply and each *instruct* the model to return JSON; the meeting contribution that must stay prose does not. The adapter turns on Ollama's constrained JSON decoding for exactly those calls. It matches the instruction rather than the bare word, and reads only system messages, so neither company data nor an agent's own mandate and personality text can flip a prose call into JSON mode.
+- **Replies are repaired before they are returned, but never invented.** Reasoning traces (only where one actually opened, whatever its case) and markdown fences are stripped. A reply that is already a JSON document is parsed as one, and if it fails to parse it is reported as malformed or truncated rather than scavenged for an inner fragment that would be returned as a confident wrong answer. Only a reply wrapped in prose is scanned for embedded JSON, with string and escape awareness, taking the largest candidate. A scalar is refused. Anything unusable is retried at temperature zero with the failure fed back to the model.
 - **A `responseSchema` is used.** A JSON Schema is forwarded to Ollama for constrained decoding; a zod schema enables JSON mode and validates the result, and a validation failure is retried like a parse failure.
 - **Failures say what to do next.** An unreachable server, an unpulled model, a timeout, and an answer truncated by the output limit each raise a distinct, actionable error. Credentials never appear in an error message.
 
