@@ -121,6 +121,27 @@ Two things the run teaches faster than reading the code:
 
 `LocalStore` is for development and learning only. It has no tenant isolation, no row level security, no concurrent-writer safety and no encryption, and it keeps the whole company in memory and rewrites the file on every append. The Supabase schema in `supabase/migrations` is the production path; see [docs/SECURITY.md](docs/SECURITY.md).
 
+## The human approval boundary
+
+`AuthorityEngine` decides that an action needs a person. `ApprovalQueue` is what happens next: it parks the request, refuses to let the company decide it, and publishes the decision back onto the event bus so the original work resumes under a name.
+
+```ts
+const approvals = new ApprovalQueue(store, { bus, agentIdentities: APPROVED_AGENTS.flatMap(a => [a.id, a.name]) });
+
+bus.on("approval.granted", async event => {
+  const { request, approvedBy } = event.payload as ApprovalOutcome;
+  await gateway.execute({ provider: request.provider, operation: request.capability, payload: request.payload, idempotencyKey: request.id, approvedBy });
+});
+```
+
+Three constitutional rules are enforced in code rather than left to the caller, because each corresponds to a clause that is binding on the whole system:
+
+- **No agent may decide it.** `agentIdentities` covers the entire roster by id and by name, not merely the agent that asked, so Sami cannot approve what Ali requested. Clause nine reserves exceptional authority from every agent, not just the requesting one.
+- **Every decision is signed.** An unnamed approver is refused, and the name travels from the grant through to `integration.requested` as `approvedBy`, so the trail reads `Ali asked, mohammed approved, the ops desk executed`. That is clause three's attribution requirement carried end to end.
+- **A decision is final.** Granting or rejecting twice is refused, and a decided id cannot be reopened by a fresh request, so a rejection cannot be quietly retried until it succeeds. Clause nine again: audit history is not erasable.
+
+The queue holds no state of its own. `pending` and `status` are derived from the append-only trail, so a restart recovers exactly what was outstanding, and the evidence is the record rather than a copy of it. `npm run demo` exercises the whole path, including the three refusals.
+
 ## Safety and operating model
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/CONSTITUTION.md](docs/CONSTITUTION.md), and [docs/SECURITY.md](docs/SECURITY.md). This repository is a production-quality foundation, not a claim that an unattended company should control funds, contracts, employment, or production deletion without configured human approval.

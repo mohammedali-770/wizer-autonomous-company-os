@@ -1,4 +1,4 @@
-import { AgentRuntime, APPROVED_AGENTS, AutonomousScheduler, ConvergenceMonitor, ExecutiveMeetingRoom, GlobalContextBuilder, IntegrationGateway, LocalStore, MemoryFabric, PersistentEventBus, ollamaFromEnv, type CompanyEvent, type IntegrationAdapter, type WorkSignal } from "./index.js";
+import { AgentRuntime, APPROVED_AGENTS, ApprovalQueue, AutonomousScheduler, ConvergenceMonitor, ExecutiveMeetingRoom, GlobalContextBuilder, IntegrationGateway, LocalStore, MemoryFabric, PersistentEventBus, ollamaFromEnv, type ApprovalOutcome, type CompanyEvent, type IntegrationAdapter, type WorkSignal } from "./index.js";
 
 const FILE=process.env.WIZER_STORE??".wizer/company.json";
 const SEATS=Number(process.env.WIZER_SEATS??3);
@@ -37,8 +37,8 @@ const gateway=new IntegrationGateway(store);
 const opsDesk:IntegrationAdapter={async execute(operation,input,idempotencyKey){ console.log(`      ops desk executed ${operation} (idempotency ${idempotencyKey})`); return {status:"recorded",input} }};
 gateway.register("ops",opsDesk);
 
+const approvals=new ApprovalQueue(store,{bus,agentIdentities:APPROVED_AGENTS.flatMap(agent=>[agent.id,agent.name])});
 const history:WorkSignal[]=[];
-const awaitingHuman:Array<{capability:string;risk:string;objective:string;agent:string}>=[];
 const halted:string[]=[];
 
 bus.on("metric.changed",async event=>{
@@ -52,10 +52,25 @@ bus.on("metric.changed",async event=>{
   history.push({fingerprint:fingerprint(proposal.objective),goalId:event.type,progress:proposal.confidence,cost:1,at:history.length});
   for(const {action,decision} of runtime.authorize(CEO,proposal)){
     if(!decision.allowed){ console.log(`      refused ${action.capability}: ${decision.reason}`); continue }
-    if(decision.requiresHuman){ awaitingHuman.push({capability:action.capability,risk:action.risk,objective:proposal.objective,agent:CEO.name}); console.log(`      parked ${action.capability} for a human: ${decision.reason}`); continue }
+    if(decision.requiresHuman){
+      await approvals.request({id:`${event.id}:${action.capability}`,companyId:COMPANY,agentId:CEO.id,agentName:CEO.name,capability:action.capability,risk:action.risk,objective:proposal.objective,provider:"ops",payload:action.input,causationId:event.id});
+      console.log(`      parked ${action.capability} for a human: ${decision.reason}`); continue;
+    }
     await gateway.execute({provider:"ops",operation:action.capability,payload:action.input,idempotencyKey:`${event.id}:${action.capability}`});
   }
   await memory.remember({companyId:COMPANY,kind:"decision",subject:proposal.objective,content:`${CEO.name} proposed "${proposal.objective}" after ${event.type}. Rationale: ${proposal.rationale}`,importance:proposal.confidence,sourceIds:[event.id]});
+});
+
+bus.on("approval.granted",async event=>{
+  const {request,approvedBy}=event.payload as ApprovalOutcome;
+  console.log(`   ${approvedBy} approved ${request.capability} for "${request.objective}"`);
+  await gateway.execute({provider:request.provider,operation:request.capability,payload:request.payload,idempotencyKey:request.id,approvedBy});
+});
+
+bus.on("approval.rejected",async event=>{
+  const {request,approvedBy,reason}=event.payload as ApprovalOutcome;
+  console.log(`   ${approvedBy} rejected ${request.capability}: ${reason}`);
+  await memory.remember({companyId:COMPANY,kind:"decision",subject:`Rejected ${request.capability}`,content:`${approvedBy} rejected ${request.capability} for "${request.objective}". Reason: ${reason}`,importance:0.9,sourceIds:[request.id]});
 });
 
 bus.on("meeting.requested",async event=>{
@@ -98,9 +113,26 @@ for(const hour of ["08:00","09:00","10:00","11:00","12:00","13:00"]){
 console.log(`\nA second pass over the same day claims ${await scheduler.tick(new Date(`${DAY}23:59:00.000Z`))} events: every one was already taken.`);
 
 line("What the company would not do on its own");
-if(awaitingHuman.length) for(const item of awaitingHuman) console.log(`  ${item.agent} wants ${item.capability} (${item.risk}) for "${item.objective}" — waiting on a person`);
-else console.log("  Nothing crossed the approval boundary this run.");
+const waiting=await approvals.pending(COMPANY);
+for(const item of waiting) console.log(`  ${item.id}\n     ${item.agentName} wants ${item.capability} (${item.risk}) for "${item.objective}"`);
+if(!waiting.length) console.log("  Nothing crossed the approval boundary this run.");
 if(halted.length) for(const reason of halted) console.log(`  stopped: ${reason}`);
+
+const first=waiting[0], second=waiting[1];
+if(first){
+  line("Who may not decide it");
+  for(const [approver,why] of [[CEO.name,"the agent that asked for it"],["Sami","another agent on the roster"],["   ","nobody named"]] as Array<[string,string]>){
+    try{ await approvals.grant(first.id,approver); console.log(`  NOT REFUSED — ${approver} approved it`) }
+    catch(error){ console.log(`  ${why}: ${(error as Error).message}`) }
+  }
+
+  line("A person decides, and the work resumes on the bus");
+  await approvals.grant(first.id,"mohammed","Runway supports one relief driver");
+  if(second) await approvals.reject(second.id,"mohammed","The same objective was already approved once today");
+  try{ await approvals.grant(first.id,"mohammed") }
+  catch(error){ console.log(`   second attempt: ${(error as Error).message}`) }
+  console.log(`\n   still waiting on a person: ${(await approvals.pending(COMPANY)).length}`);
+}
 
 line("Audit trail");
 const counts=new Map<string,number>();

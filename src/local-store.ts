@@ -48,6 +48,21 @@ export class LocalStore implements Store {
         .map(({hits:_hits,...memory})=>memory);
       return scored.slice(0,limit??12) as T;
     }
+    if(operation==="approvals.pending"){
+      const {companyId}=(input??{}) as {companyId?:string};
+      const decided=new Set(this.state.log.filter(entry=>entry.operation==="approval.granted"||entry.operation==="approval.rejected").map(entry=>(entry.input as {request?:{id?:string}}).request?.id));
+      return this.state.log.filter(entry=>entry.operation==="approval.requested").map(entry=>entry.input as {id:string;companyId:string})
+        .filter(request=>!decided.has(request.id)&&(!companyId||request.companyId===companyId)) as T;
+    }
+    if(operation==="approvals.status"){
+      const {id}=(input??{}) as {id?:string};
+      for(const entry of this.state.log){
+        const decision=entry.input as {request?:{id?:string}};
+        if(entry.operation==="approval.granted"&&decision.request?.id===id) return "granted" as T;
+        if(entry.operation==="approval.rejected"&&decision.request?.id===id) return "rejected" as T;
+      }
+      return (this.state.log.some(entry=>entry.operation==="approval.requested"&&(entry.input as {id?:string}).id===id)?"pending":"unknown") as T;
+    }
     if(operation==="scheduler.claim_due"){
       const {now}=(input??{}) as {now?:string};
       const cutoff=now??new Date().toISOString();
