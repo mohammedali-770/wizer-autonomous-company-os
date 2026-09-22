@@ -85,6 +85,27 @@ const model = new OllamaReasoningModel({
 
 `undici` ships inside Node and is not a dependency of this package; install it only if you need to construct an `Agent`. The adapter detects this failure and names the fix rather than reporting an unreachable server.
 
+## Running the whole company locally, for nothing
+
+`LocalStore` is a `Store` implementation backed by one JSON file, with no dependencies and no services. Together with the Ollama adapter it makes the repository runnable on hardware you already own, with no cloud account and no API key.
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.2:3b
+npm ci && npm run demo
+```
+
+The demo seeds a small fictional company, builds the Global Company Context, has the CEO generate a work proposal from a metric that moved, runs it through the authority engine, convenes a three-seat meeting, writes and recalls a memory, and prints the audit trail. Point it at a board on your network with `OLLAMA_BASE_URL=http://raspberrypi.local:11434`, choose a model with `LLM_MODEL`, and change the table size with `WIZER_SEATS`.
+
+Everything it did is in `.wizer/company.json`. That file is the point: the proposal, the meeting turns, the synthesis and the memory are all evidence you can read, which is easier to reason about than a database when you are learning what the system does.
+
+Two things the run teaches faster than reading the code:
+
+- **Seats are expensive.** Each participant in `ExecutiveMeetingRoom.convene` reads the whole accumulating transcript, so cost grows with the square of the table. Nine executives on a single board is tens of minutes per meeting. Start at three.
+- **Small models fail at shape before they fail at judgement.** A 1B model often cannot hold the `WorkProposal` structure at all. At 3B the structure survives and the reasoning is thin. Watch `lastStats()` in the demo output to learn what your own hardware actually does, rather than trusting anyone's benchmark.
+
+`LocalStore` is for development and learning only. It has no tenant isolation, no row level security, no concurrent-writer safety and no encryption, and it keeps the whole company in memory and rewrites the file on every append. The Supabase schema in `supabase/migrations` is the production path; see [docs/SECURITY.md](docs/SECURITY.md).
+
 ## Safety and operating model
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/CONSTITUTION.md](docs/CONSTITUTION.md), and [docs/SECURITY.md](docs/SECURITY.md). This repository is a production-quality foundation, not a claim that an unattended company should control funds, contracts, employment, or production deletion without configured human approval.
