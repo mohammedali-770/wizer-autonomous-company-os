@@ -34,7 +34,7 @@ const room=new ExecutiveMeetingRoom(model,store);
 const memory=new MemoryFabric(store);
 const monitor=new ConvergenceMonitor();
 const gateway=new IntegrationGateway(store);
-const opsDesk:IntegrationAdapter={async execute(operation,input,idempotencyKey){ console.log(`      ops desk executed ${operation} (idempotency ${idempotencyKey})`); return {status:"recorded",input} }};
+const opsDesk:IntegrationAdapter={async execute(operation,_input,idempotencyKey){ console.log(`      ops desk executed ${operation} (idempotency ${idempotencyKey})`); return {status:"recorded",ticket:`OPS-${idempotencyKey}`} }};
 gateway.register("ops",opsDesk);
 
 const approvals=new ApprovalQueue(store,{bus,agentIdentities:APPROVED_AGENTS.flatMap(agent=>[agent.id,agent.name])});
@@ -133,6 +133,14 @@ if(first){
   catch(error){ console.log(`   second attempt: ${(error as Error).message}`) }
   console.log(`\n   still waiting on a person: ${(await approvals.pending(COMPANY)).length}`);
 }
+
+line("The same instruction twice");
+const replayKey="demo:driver.assign", replayPayload={zone:"Sunday",driver:"Rami"};
+await gateway.execute({provider:"ops",operation:"driver.assign",payload:replayPayload,idempotencyKey:replayKey});
+await gateway.execute({provider:"ops",operation:"driver.assign",payload:replayPayload,idempotencyKey:replayKey});
+console.log("   the ops desk ran once, though the gateway was called twice");
+try{ await gateway.execute({provider:"ops",operation:"driver.assign",payload:{zone:"Monday",driver:"Rami"},idempotencyKey:replayKey}); console.log("   NOT REFUSED") }
+catch(error){ console.log(`   ${(error as Error).message}`) }
 
 line("Audit trail");
 const counts=new Map<string,number>();

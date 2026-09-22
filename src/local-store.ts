@@ -48,6 +48,18 @@ export class LocalStore implements Store {
         .map(({hits:_hits,...memory})=>memory);
       return scored.slice(0,limit??12) as T;
     }
+    if(operation==="integrations.by_key"){
+      const {idempotencyKey}=(input??{}) as {idempotencyKey?:string};
+      let record:{status:string;fingerprint:string;result?:unknown;error?:string}|null=null;
+      for(const entry of this.state.log){
+        const value=entry.input as {idempotencyKey?:string;fingerprint?:string;result?:unknown;error?:string};
+        if(value.idempotencyKey!==idempotencyKey) continue;
+        if(entry.operation==="integration.completed") record={status:"completed",fingerprint:value.fingerprint??"",result:value.result};
+        else if(entry.operation==="integration.failed") record={status:"failed",fingerprint:value.fingerprint??"",error:value.error};
+        else if(entry.operation==="integration.requested"&&record===null) record={status:"in_doubt",fingerprint:value.fingerprint??""};
+      }
+      return record as T;
+    }
     if(operation==="approvals.pending"){
       const {companyId}=(input??{}) as {companyId?:string};
       const decided=new Set(this.state.log.filter(entry=>entry.operation==="approval.granted"||entry.operation==="approval.rejected").map(entry=>(entry.input as {request?:{id?:string}}).request?.id));

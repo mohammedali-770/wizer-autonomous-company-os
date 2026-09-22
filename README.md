@@ -142,6 +142,33 @@ Three constitutional rules are enforced in code rather than left to the caller, 
 
 The queue holds no state of its own. `pending` and `status` are derived from the append-only trail, so a restart recovers exactly what was outstanding, and the evidence is the record rather than a copy of it. `npm run demo` exercises the whole path, including the three refusals.
 
+## What a Store must answer
+
+`Store.append` accepts any operation, so evidence is open ended. Reads are not: the core asks for exactly these, and an implementation that omits one will fail at the call site rather than at startup.
+
+| Read | Returns |
+| --- | --- |
+| `context.strategy` and the nine other domains | that slice of the company, or `null` |
+| `memory.recall` | scored memories for a query, honouring `kinds` and `limit` |
+| `scheduler.claim_due` | events at or before `now`, claimed so they are not returned twice |
+| `approvals.pending` | approval requests with no decision recorded |
+| `approvals.status` | `pending`, `granted`, `rejected` or `unknown` for one id |
+| `integrations.by_key` | the last outcome for an idempotency key, or `null` |
+
+`LocalStore` derives all six by folding the append-only log, which is why a restart recovers the exact outstanding state. A production store should answer them from indexed tables, and `scheduler.claim_due` and `integrations.by_key` need transactions to be correct under concurrency.
+
+## Executing an effect exactly once
+
+`IntegrationGateway` refuses to run the same side effect twice. Before calling an adapter it reads `integrations.by_key`; a key that already completed returns the original result and records `integration.duplicate` rather than repeating the work. Concurrent calls on one key collapse into a single execution, and the record is durable, so a restarted process does not repeat what the previous one finished.
+
+A failed attempt may be retried under the same key, because a failure is not a completed effect. A request with no recorded outcome, which is what a process killed mid-call leaves behind, is retried too, and both requests stay visible in the trail so an auditor can see the gap. Closing that window for real needs the store to record the attempt and the outcome in one transaction; no client-side gateway can do it alone.
+
+Reusing a key for different work is refused outright. Each request is fingerprinted over its provider, operation and payload, with object keys sorted so that field order cannot change the result, and a key whose fingerprint does not match its earlier use raises rather than silently returning the old result.
+
+The payload itself is never written to the trail. Only the fingerprint is, so `integration.requested`, `integration.completed` and `integration.failed` can be read, compared and audited without exposing the customer or payment details an effect carried.
+
+What an adapter *returns* is recorded verbatim, because the result is the evidence that the effect happened. The gateway cannot redact what it did not construct, so an adapter that echoes its own input back into its result puts the payload straight into the trail the gateway just kept it out of. Return a receipt, a reference or a status, not the request.
+
 ## Safety and operating model
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/CONSTITUTION.md](docs/CONSTITUTION.md), and [docs/SECURITY.md](docs/SECURITY.md). This repository is a production-quality foundation, not a claim that an unattended company should control funds, contracts, employment, or production deletion without configured human approval.
