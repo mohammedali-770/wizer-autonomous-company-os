@@ -95,13 +95,28 @@ ollama pull llama3.2:3b
 npm ci && npm run demo
 ```
 
-The demo seeds a small fictional company, builds the Global Company Context, has the CEO generate a work proposal from a metric that moved, runs it through the authority engine, convenes a three-seat meeting, writes and recalls a memory, and prints the audit trail. Point it at a board on your network with `OLLAMA_BASE_URL=http://raspberrypi.local:11434`, choose a model with `LLM_MODEL`, and change the table size with `WIZER_SEATS`.
+The demo seeds a small fictional company, queues a day of events, and then calls nothing. `AutonomousScheduler` claims each event when its hour arrives and `PersistentEventBus` routes it to whichever handler is registered for that type, so the run walks the whole documented path — trigger, context, deliberation, authority, work, integration, evidence, convergence — under its own power.
+
+```
+--- 08:00 ---
+   Ali proposes: Diagnose and fix Sunday delivery lateness
+      ops desk executed work.delegate (idempotency evt-1:work.delegate)
+      parked decision.approve for a human: Consequential action crosses the human approval boundary
+--- 10:00 ---
+   Sami proposes: Diagnose and fix Sunday delivery lateness
+      decision.approve (high) -> outside delegated authority
+--- 13:00 ---
+   convergence monitor refused to act again — Repeated equivalent work detected
+```
+
+Those three lines are the system's whole argument: the same proposal is executed, parked, or refused depending on which agent made it and what it costs, and a trigger that keeps firing eventually stops being acted on. Point it at a board on your network with `OLLAMA_BASE_URL=http://raspberrypi.local:11434`, choose a model with `LLM_MODEL`, and change the table size with `WIZER_SEATS`.
 
 Everything it did is in `.wizer/company.json`. That file is the point: the proposal, the meeting turns, the synthesis and the memory are all evidence you can read, which is easier to reason about than a database when you are learning what the system does.
 
 Two things the run teaches faster than reading the code:
 
 - **Seats are expensive.** Each participant in `ExecutiveMeetingRoom.convene` reads the whole accumulating transcript, so cost grows with the square of the table. Nine executives on a single board is tens of minutes per meeting. Start at three.
+- **Delivery is at most once.** `scheduler.claim_due` claims an event before its handler runs, so a handler that throws forfeits the rest of that batch and those events are not redelivered. The demo's handlers catch their own failures for that reason; yours should too, until the store claims transactionally.
 - **Small models fail at shape before they fail at judgement.** A 1B model often cannot hold the `WorkProposal` structure at all. At 3B the structure survives and the reasoning is thin. Watch `lastStats()` in the demo output to learn what your own hardware actually does, rather than trusting anyone's benchmark.
 
 `LocalStore` is for development and learning only. It has no tenant isolation, no row level security, no concurrent-writer safety and no encryption, and it keeps the whole company in memory and rewrites the file on every append. The Supabase schema in `supabase/migrations` is the production path; see [docs/SECURITY.md](docs/SECURITY.md).
