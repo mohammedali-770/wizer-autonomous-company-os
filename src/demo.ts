@@ -1,4 +1,4 @@
-import { AgentRuntime, APPROVED_AGENTS, ApprovalQueue, AutonomousScheduler, ConvergenceMonitor, ExecutiveMeetingRoom, GlobalContextBuilder, IntegrationGateway, LocalStore, MemoryFabric, PersistentEventBus, ollamaFromEnv, type ApprovalOutcome, type CompanyEvent, type IntegrationAdapter, type WorkSignal } from "./index.js";
+import { AgentRuntime, APPROVED_AGENTS, ApprovalQueue, SqliteStore, AutonomousScheduler, ConvergenceMonitor, ExecutiveMeetingRoom, GlobalContextBuilder, IntegrationGateway, LocalStore, MemoryFabric, PersistentEventBus, ollamaFromEnv, type ApprovalOutcome, type CompanyEvent, type IntegrationAdapter, type WorkSignal } from "./index.js";
 
 const FILE=process.env.WIZER_STORE??".wizer/company.json";
 const SEATS=Number(process.env.WIZER_SEATS??3);
@@ -9,7 +9,8 @@ const line=(label:string)=>console.log(`\n${"=".repeat(68)}\n${label}\n${"=".rep
 const fingerprint=(text:string)=>{let hash=0;for(const ch of text.toLowerCase().replace(/[^a-z0-9]+/g," ").trim())hash=(hash*31+ch.charCodeAt(0))|0;return `fp-${(hash>>>0).toString(36)}`};
 const event=(id:string,type:string,at:string,payload:unknown):CompanyEvent=>({id,companyId:COMPANY,type,payload,occurredAt:`${DAY}${at}:00.000Z`});
 
-const store=await LocalStore.open(FILE);
+const store=process.env.WIZER_DB?await SqliteStore.open(process.env.WIZER_DB):await LocalStore.open(FILE);
+const where=process.env.WIZER_DB??FILE;
 store.seedContext({
   strategy:{mission:"Supply single-origin coffee to offices in Amman",goals:["Reach 40 recurring office accounts","Hold gross margin above 55%"]},
   organization:{headcount:6,openRoles:["Delivery coordinator"]},
@@ -24,7 +25,7 @@ store.seedContext({
 });
 
 const model=ollamaFromEnv();
-line(`Wizer autonomous run — model ${process.env.LLM_MODEL??"llama3.2:3b"}, store ${FILE}`);
+line(`Wizer autonomous run — model ${process.env.LLM_MODEL??"llama3.2:3b"}, store ${where}`);
 try{ await model.warmup() }catch(error){ console.error(`\n${(error as Error).message}\n`); process.exit(1) }
 
 const bus=new PersistentEventBus(store);
@@ -146,4 +147,4 @@ line("Audit trail");
 const counts=new Map<string,number>();
 for(const entry of store.log()) counts.set(entry.operation,(counts.get(entry.operation)??0)+1);
 for(const [operation,count] of [...counts].sort()) console.log(`  ${operation.padEnd(24)} ${count}`);
-console.log(`\nEvery line above is evidence in ${FILE}.`);
+console.log(`\nEvery line above is evidence in ${where}.`);

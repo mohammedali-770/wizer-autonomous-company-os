@@ -116,7 +116,7 @@ Everything it did is in `.wizer/company.json`. That file is the point: the propo
 Two things the run teaches faster than reading the code:
 
 - **Seats are expensive.** Each participant in `ExecutiveMeetingRoom.convene` reads the whole accumulating transcript, so cost grows with the square of the table. Nine executives on a single board is tens of minutes per meeting. Start at three.
-- **Delivery is at most once.** `scheduler.claim_due` claims an event before its handler runs, so a handler that throws forfeits the rest of that batch and those events are not redelivered. The demo's handlers catch their own failures for that reason; yours should too, until the store claims transactionally.
+- **`LocalStore` delivers at most once.** It claims an event before its handler runs, so a handler that throws forfeits the rest of that batch. `SqliteStore` does not have this limitation; either way the demo's handlers catch their own failures, and yours should too.
 - **Small models fail at shape before they fail at judgement.** A 1B model often cannot hold the `WorkProposal` structure at all. At 3B the structure survives and the reasoning is thin. Watch `lastStats()` in the demo output to learn what your own hardware actually does, rather than trusting anyone's benchmark.
 
 `LocalStore` is for development and learning only. It has no tenant isolation, no row level security, no concurrent-writer safety and no encryption, and it keeps the whole company in memory and rewrites the file on every append. The Supabase schema in `supabase/migrations` is the production path; see [docs/SECURITY.md](docs/SECURITY.md).
@@ -155,19 +155,35 @@ The queue holds no state of its own. `pending` and `status` are derived from the
 | `approvals.status` | `pending`, `granted`, `rejected` or `unknown` for one id |
 | `integrations.by_key` | the last outcome for an idempotency key, or `null` |
 
-`LocalStore` derives all six by folding the append-only log, which is why a restart recovers the exact outstanding state. A production store should answer them from indexed tables, and `scheduler.claim_due` and `integrations.by_key` need transactions to be correct under concurrency.
+`LocalStore` derives all six by folding the append-only log, which is why a restart recovers the exact outstanding state. `SqliteStore` answers them from indexed tables and takes the transactions that `scheduler.claim_due` and `integrations.by_key` need in order to be correct when more than one run is going.
 
 ## Executing an effect exactly once
 
 `IntegrationGateway` refuses to run the same side effect twice. Before calling an adapter it reads `integrations.by_key`; a key that already completed returns the original result and records `integration.duplicate` rather than repeating the work. Concurrent calls on one key collapse into a single execution, and the record is durable, so a restarted process does not repeat what the previous one finished.
 
-A failed attempt may be retried under the same key, because a failure is not a completed effect. A request with no recorded outcome, which is what a process killed mid-call leaves behind, is retried too, and both requests stay visible in the trail so an auditor can see the gap. Closing that window for real needs the store to record the attempt and the outcome in one transaction; no client-side gateway can do it alone.
+A failed attempt may be retried under the same key, because a failure is not a completed effect. A request with no recorded outcome, which is what a process killed mid-call leaves behind, is retried once its reservation has gone stale, and both requests stay visible in the trail so an auditor can see the gap. The gateway's in-process guard cannot see another process; `SqliteStore` closes that by making the reservation itself the lock, so a second run is refused rather than allowed to repeat the effect. What no store can close is the window inside a single attempt: the side effect happens outside the database, so a process killed between calling the adapter and recording the outcome leaves a fact the database never saw.
 
 Reusing a key for different work is refused outright. Each request is fingerprinted over its provider, operation and payload, with object keys sorted so that field order cannot change the result, and a key whose fingerprint does not match its earlier use raises rather than silently returning the old result.
 
 The payload itself is never written to the trail. Only the fingerprint is, so `integration.requested`, `integration.completed` and `integration.failed` can be read, compared and audited without exposing the customer or payment details an effect carried.
 
 What an adapter *returns* is recorded verbatim, because the result is the evidence that the effect happened. The gateway cannot redact what it did not construct, so an adapter that echoes its own input back into its result puts the payload straight into the trail the gateway just kept it out of. Return a receipt, a reference or a status, not the request.
+
+## A store that takes transactions
+
+`SqliteStore` answers the same six reads as `LocalStore` over a single SQLite file, with no dependencies and no service, using the `node:sqlite` module built into Node 22.5 and newer. It is a drop-in: the demo runs against either and writes the same trail.
+
+```bash
+WIZER_DB=.wizer/company.db npm run demo
+```
+
+Two things `LocalStore` cannot do follow from having real transactions.
+
+**A handler that throws no longer costs the rest of the batch.** Claiming and delivering are separate facts. `scheduler.claim_due` takes a short lease on the rows it hands out, and an event counts as delivered only once `events.publish` records it, so a batch interrupted half way leaves the untouched events to be claimed again while the one that failed is not retried. A lease also stops two runs claiming the same event, which the in-memory store cannot prevent at all.
+
+**A second run cannot repeat an effect the first is still performing.** The reservation written by `integration.requested` is the lock: taking it is a transaction, so a concurrent run is refused by the database rather than by a guard that only sees its own process. A reservation whose run died becomes claimable again once the lease expires, and a refused append rolls back whole, so the trail never records a request that was turned away.
+
+`SqliteStore.open()` imports `node:sqlite` lazily, so the package still loads on Node 20, where the class throws a clear error and `LocalStore` remains the option. CI runs the suite on both, and these tests skip where the module is absent.
 
 ## Safety and operating model
 
